@@ -196,13 +196,67 @@ export class SynthesisEngine {
 		return actions;
 	}
 
+	/**
+	 * Everything that happened in one calendar week: decisions made and actions
+	 * recorded whose `date` falls in [weekStart, weekStart + 7 days). Decisions
+	 * are limited to active ones; actions include both open and closed (it's a
+	 * "what happened this week" summary). Items with an unparseable date are
+	 * excluded rather than crashing the rollup.
+	 *
+	 * The window check is timezone-safe: both the week boundary and each item's
+	 * date are reduced to a calendar-date string (YYYY-MM-DD) and compared
+	 * lexicographically — valid chronological order for this fixed-width,
+	 * zero-padded format — so no Date/timezone parsing affects the boundary.
+	 */
 	getWeeklyRollup(weekStartISO: string): {
 		decisions: Decision[];
 		actions: ActionItem[];
 	} {
-		// TODO Phase 3: collect decisions/actions falling within the given week.
-		void weekStartISO;
-		return { decisions: [], actions: [] };
+		const weekStart = weekStartISO.slice(0, 10);
+		const weekEnd = this.addDays(weekStart, 7);
+
+		const inWindow = (date: string): boolean => {
+			const day = date.slice(0, 10);
+			if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) {
+				return false;
+			}
+			return day >= weekStart && day < weekEnd;
+		};
+
+		const decisions: Decision[] = [];
+		const actions: ActionItem[] = [];
+		for (const entry of Object.values(this.cache.notes)) {
+			for (const decision of entry.decisions) {
+				if (decision.status === "active" && inWindow(decision.date)) {
+					decisions.push(decision);
+				}
+			}
+			for (const action of entry.actions) {
+				if (inWindow(action.date)) {
+					actions.push(action);
+				}
+			}
+		}
+
+		decisions.sort((a, b) => b.date.slice(0, 10).localeCompare(a.date.slice(0, 10)));
+		actions.sort((a, b) => a.date.slice(0, 10).localeCompare(b.date.slice(0, 10)));
+
+		return { decisions, actions };
+	}
+
+	/**
+	 * Add a number of days to a YYYY-MM-DD calendar date, returning a YYYY-MM-DD
+	 * string. Arithmetic runs in UTC so month boundaries and DST never shift the
+	 * result.
+	 */
+	private addDays(dateOnly: string, days: number): string {
+		const [year, month, day] = dateOnly.split("-").map(Number);
+		const dt = new Date(Date.UTC(year, month - 1, day));
+		dt.setUTCDate(dt.getUTCDate() + days);
+		const y = dt.getUTCFullYear();
+		const m = String(dt.getUTCMonth() + 1).padStart(2, "0");
+		const d = String(dt.getUTCDate()).padStart(2, "0");
+		return `${y}-${m}-${d}`;
 	}
 
 	detectConflicts(): Decision[] {
@@ -215,10 +269,14 @@ export class SynthesisEngine {
 	/**
 	 * Render the full synthesis report as a markdown document. Pure: reads the
 	 * in-memory cache and returns a string — writing it to the vault is the
-	 * caller's job. Weekly-rollup and conflict sections are placeholders until
-	 * those readers are built.
+	 * caller's job.
+	 *
+	 * The engine never computes "today" itself (that would make it
+	 * non-deterministic). The caller passes the week's start; when omitted the
+	 * Weekly rollup falls back to a "Coming soon" placeholder. The Conflicts
+	 * section is a placeholder until that reader is built.
 	 */
-	buildReportMarkdown(): string {
+	buildReportMarkdown(weekStartISO?: string): string {
 		const lines: string[] = [];
 
 		lines.push("# Meeting Synthesis");
@@ -257,7 +315,40 @@ export class SynthesisEngine {
 		lines.push("");
 
 		lines.push("## Weekly rollup");
-		lines.push("_Coming soon._");
+		if (weekStartISO) {
+			const weekDate = weekStartISO.split("T")[0] ?? weekStartISO;
+			lines.push(`_Week of ${weekDate}_`);
+			lines.push("");
+
+			const rollup = this.getWeeklyRollup(weekStartISO);
+
+			lines.push("### Decisions this week");
+			if (rollup.decisions.length === 0) {
+				lines.push("_No decisions this week._");
+			} else {
+				for (const decision of rollup.decisions) {
+					const link = this.noteName(decision.sourcePath);
+					lines.push(
+						`- **${decision.topic}** — ${decision.text} _([[${link}]])_`
+					);
+				}
+			}
+			lines.push("");
+
+			lines.push("### Actions this week");
+			if (rollup.actions.length === 0) {
+				lines.push("_No actions this week._");
+			} else {
+				for (const action of rollup.actions) {
+					const box = action.open ? "[ ]" : "[x]";
+					const owner = action.owner || "unassigned";
+					const link = this.noteName(action.sourcePath);
+					lines.push(`- ${box} ${action.text} — **${owner}** _([[${link}]])_`);
+				}
+			}
+		} else {
+			lines.push("_Coming soon._");
+		}
 		lines.push("");
 
 		lines.push("## Conflicts");

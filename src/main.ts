@@ -121,7 +121,9 @@ export default class MeetingNotesSynthesizerPlugin extends Plugin {
 	private async runGenerateReport(): Promise<void> {
 		const path = "Meeting Synthesis.md";
 		try {
-			const markdown = this.engine.buildReportMarkdown();
+			const markdown = this.engine.buildReportMarkdown(
+				this.currentWeekStartISO()
+			);
 
 			const existing = this.app.vault.getAbstractFileByPath(path);
 			let file: TFile;
@@ -141,5 +143,24 @@ export default class MeetingNotesSynthesizerPlugin extends Plugin {
 			);
 			new Notice("Failed to write synthesis report. See console.");
 		}
+	}
+
+	/**
+	 * The current week's Monday as a calendar-date string (YYYY-MM-DD). Built
+	 * from the Monday's LOCAL year/month/day components — never toISOString(),
+	 * which would shift the date across the UTC boundary in non-UTC timezones.
+	 * Monday-start week: Sunday (getDay() === 0) belongs to the previous Monday,
+	 * so it steps back 6 days rather than forward.
+	 */
+	private currentWeekStartISO(): string {
+		const now = new Date();
+		const daysSinceMonday = now.getDay() === 0 ? 6 : now.getDay() - 1;
+		const monday = new Date(now);
+		monday.setDate(now.getDate() - daysSinceMonday);
+
+		const year = monday.getFullYear();
+		const month = String(monday.getMonth() + 1).padStart(2, "0");
+		const day = String(monday.getDate()).padStart(2, "0");
+		return `${year}-${month}-${day}`;
 	}
 }
