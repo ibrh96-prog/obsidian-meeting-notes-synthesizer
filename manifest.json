@@ -1,0 +1,11 @@
+{
+  "id": "meeting-notes-synthesizer",
+  "name": "Meeting Notes Synthesizer",
+  "version": "0.1.0",
+  "minAppVersion": "1.5.0",
+  "description": "Cross-meeting synthesis: decision history, open action tracking, and weekly rollups from your meeting notes.",
+  "author": "Ibrahim Edhem Harbutlu",
+  "authorUrl": "https://ibrh96.gumroad.com",
+  "fundingUrl": "https://ibrh96.gumroad.com",
+  "isDesktopOnly": false
+}
