@@ -6,10 +6,53 @@ import type {
 	SynthesisCache,
 } from "./types";
 
+// --- Shape the LLM is asked to return (validated before use) ---
+
+interface ExtractedDecision {
+	text: string;
+	topic: string;
+}
+
+interface ExtractedAction {
+	text: string;
+	owner: string;
+	dueDate: string | null;
+}
+
+interface ExtractionResult {
+	attendees: string[];
+	decisions: ExtractedDecision[];
+	actions: ExtractedAction[];
+}
+
+const EXTRACTION_SYSTEM_PROMPT = [
+	"You are a meeting-notes extraction engine. Read the meeting note and",
+	"extract its attendees, decisions, and action items.",
+	"",
+	"Return ONLY a valid JSON object — no markdown code fences, no commentary,",
+	"no prose before or after. The object must match exactly this shape:",
+	"{",
+	'  "attendees": string[],',
+	'  "decisions": [{ "text": string, "topic": string }],',
+	'  "actions": [{ "text": string, "owner": string, "dueDate": string | null }]',
+	"}",
+	"",
+	"Rules:",
+	"- If a field is unknown, use an empty array or null as appropriate.",
+	'- "owner" is the person responsible for the action; use "" if unclear.',
+	'- "topic" is a short subject label for the decision.',
+	'- "dueDate" is an ISO date (YYYY-MM-DD) or null.',
+	"- Do NOT invent content that is not in the note.",
+].join("\n");
+
 /**
  * Owns the synthesis cache and answers cross-meeting queries.
- * Phase 2 skeleton: methods compile and return empty results. Real
- * extraction/analysis lands in Phase 3.
+ *
+ * The engine is deliberately free of any Obsidian Plugin API: it never touches
+ * the vault, settings, or saveData. It reads notes that were collected for it,
+ * reaches the network only through the injected {@link LLMAdapter}, and mutates
+ * the {@link SynthesisCache} it was constructed with. Persisting that cache is
+ * the caller's job. This keeps the engine pure and testable.
  */
 export class SynthesisEngine {
 	private readonly llm: LLMAdapter;
@@ -20,12 +63,75 @@ export class SynthesisEngine {
 		this.cache = cache;
 	}
 
+	/**
+	 * Extract decisions/actions for every note, incrementally.
+	 *
+	 * Unchanged notes (same mtime as the cache) are skipped so we don't pay for
+	 * a BYOK API call we've already made. Changed/new notes are re-extracted.
+	 * Notes that disappeared from the vault are dropped from the cache. The
+	 * cache object passed to the constructor is mutated in place; the caller is
+	 * responsible for persisting it afterwards.
+	 */
 	async syncNotes(notes: MeetingNote[]): Promise<void> {
-		// TODO Phase 3: for each changed note (mtime differs from cache),
-		// call the LLM to extract decisions/actions and store them in the cache.
-		void notes;
-		void this.llm;
-		void this.cache;
+		const seenPaths = new Set<string>();
+
+		for (const note of notes) {
+			seenPaths.add(note.path);
+
+			const existing = this.cache.notes[note.path];
+			if (existing && existing.mtime === note.mtime) {
+				// Unchanged since last sync — reuse the cached extraction.
+				continue;
+			}
+
+			const extracted = await this.extractNote(note);
+			if (!extracted) {
+				// Extraction failed for this note. Leave any prior cache entry
+				// untouched (stale mtime stays) so the next sync retries it.
+				continue;
+			}
+
+			const attendees = this.dedupe([
+				...note.attendees,
+				...extracted.attendees,
+			]);
+			note.attendees = attendees;
+
+			const decisions: Decision[] = extracted.decisions.map((d, index) => ({
+				id: this.makeId(note.path, "decision", index),
+				text: d.text,
+				topic: d.topic,
+				date: note.date,
+				sourcePath: note.path,
+				status: "active",
+				supersededBy: null,
+			}));
+
+			const actions: ActionItem[] = extracted.actions.map((a, index) => ({
+				id: this.makeId(note.path, "action", index),
+				text: a.text,
+				owner: a.owner,
+				date: note.date,
+				sourcePath: note.path,
+				open: true,
+				dueDate: a.dueDate,
+			}));
+
+			this.cache.notes[note.path] = {
+				mtime: note.mtime,
+				decisions,
+				actions,
+			};
+		}
+
+		// Drop cache entries for notes that no longer exist in the vault.
+		for (const path of Object.keys(this.cache.notes)) {
+			if (!seenPaths.has(path)) {
+				delete this.cache.notes[path];
+			}
+		}
+
+		this.cache.lastSynced = new Date().toISOString();
 	}
 
 	getDecisionHistory(topic?: string): Decision[] {
@@ -52,5 +158,163 @@ export class SynthesisEngine {
 	detectConflicts(): Decision[] {
 		// TODO Phase 3: flag superseded/conflicting decisions across meetings.
 		return [];
+	}
+
+	// --- Extraction internals ---
+
+	/**
+	 * Ask the LLM to extract one note. Parses the response defensively and
+	 * retries once on invalid JSON. Returns null (and warns) if both attempts
+	 * fail, so the caller can skip the note without aborting the whole sync.
+	 */
+	private async extractNote(note: MeetingNote): Promise<ExtractionResult | null> {
+		const userPrompt = this.buildUserPrompt(note);
+
+		const first = await this.llm.complete(EXTRACTION_SYSTEM_PROMPT, userPrompt);
+		const parsedFirst = this.parseExtraction(first);
+		if (parsedFirst) {
+			return parsedFirst;
+		}
+
+		const retryPrompt =
+			`${userPrompt}\n\n` +
+			"Your previous output was not valid JSON. Return ONLY the JSON object.";
+		const second = await this.llm.complete(EXTRACTION_SYSTEM_PROMPT, retryPrompt);
+		const parsedSecond = this.parseExtraction(second);
+		if (parsedSecond) {
+			return parsedSecond;
+		}
+
+		console.warn(
+			`[Meeting Notes Synthesizer] Could not parse extraction for note: ${note.path}`
+		);
+		return null;
+	}
+
+	private buildUserPrompt(note: MeetingNote): string {
+		const lines = [`Title: ${note.title}`, `Date: ${note.date}`];
+		if (note.attendees.length > 0) {
+			lines.push(`Frontmatter attendees: ${note.attendees.join(", ")}`);
+		}
+		lines.push("", "Note content:", note.rawContent);
+		return lines.join("\n");
+	}
+
+	private parseExtraction(raw: string): ExtractionResult | null {
+		const cleaned = this.stripFences(raw);
+		try {
+			const value: unknown = JSON.parse(cleaned);
+			return this.coerceExtraction(value);
+		} catch {
+			return null;
+		}
+	}
+
+	/** Remove an accidental ```json … ``` wrapper before parsing. */
+	private stripFences(raw: string): string {
+		let text = raw.trim();
+		if (text.startsWith("```")) {
+			text = text
+				.replace(/^```[a-zA-Z]*\s*/, "")
+				.replace(/\s*```$/, "");
+		}
+		return text.trim();
+	}
+
+	/** Validate/normalize an arbitrary parsed value into an ExtractionResult. */
+	private coerceExtraction(value: unknown): ExtractionResult | null {
+		if (typeof value !== "object" || value === null) {
+			return null;
+		}
+		const obj = value as Record<string, unknown>;
+
+		const decisions = Array.isArray(obj["decisions"])
+			? obj["decisions"]
+					.map((d) => this.coerceDecision(d))
+					.filter((d): d is ExtractedDecision => d !== null)
+			: [];
+
+		const actions = Array.isArray(obj["actions"])
+			? obj["actions"]
+					.map((a) => this.coerceAction(a))
+					.filter((a): a is ExtractedAction => a !== null)
+			: [];
+
+		return {
+			attendees: this.toStringArray(obj["attendees"]),
+			decisions,
+			actions,
+		};
+	}
+
+	private coerceDecision(value: unknown): ExtractedDecision | null {
+		if (typeof value !== "object" || value === null) {
+			return null;
+		}
+		const obj = value as Record<string, unknown>;
+		const text = typeof obj["text"] === "string" ? obj["text"].trim() : "";
+		if (text === "") {
+			return null;
+		}
+		const topic = typeof obj["topic"] === "string" ? obj["topic"].trim() : "";
+		return { text, topic };
+	}
+
+	private coerceAction(value: unknown): ExtractedAction | null {
+		if (typeof value !== "object" || value === null) {
+			return null;
+		}
+		const obj = value as Record<string, unknown>;
+		const text = typeof obj["text"] === "string" ? obj["text"].trim() : "";
+		if (text === "") {
+			return null;
+		}
+		const owner = typeof obj["owner"] === "string" ? obj["owner"].trim() : "";
+		const due = obj["dueDate"];
+		const dueDate =
+			typeof due === "string" && due.trim() !== "" ? due.trim() : null;
+		return { text, owner, dueDate };
+	}
+
+	private toStringArray(value: unknown): string[] {
+		if (!Array.isArray(value)) {
+			return [];
+		}
+		return value
+			.filter((v): v is string => typeof v === "string")
+			.map((v) => v.trim())
+			.filter((v) => v !== "");
+	}
+
+	private dedupe(values: string[]): string[] {
+		const seen = new Set<string>();
+		const out: string[] = [];
+		for (const value of values) {
+			const key = value.toLowerCase();
+			if (value === "" || seen.has(key)) {
+				continue;
+			}
+			seen.add(key);
+			out.push(value);
+		}
+		return out;
+	}
+
+	/**
+	 * Stable id for an extracted item: kind + a hash of the source path + index.
+	 * Deterministic per note so re-syncing the same note produces the same ids
+	 * instead of duplicating.
+	 */
+	private makeId(sourcePath: string, kind: string, index: number): string {
+		return `${kind}-${this.hash(sourcePath)}-${index}`;
+	}
+
+	/** Small deterministic djb2 hash, rendered as base-36. */
+	private hash(input: string): string {
+		let h = 5381;
+		for (let i = 0; i < input.length; i++) {
+			h = (((h << 5) + h) + input.charCodeAt(i)) | 0;
+		}
+		return (h >>> 0).toString(36);
 	}
 }

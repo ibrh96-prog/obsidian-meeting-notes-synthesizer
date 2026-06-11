@@ -17,7 +17,7 @@ export const DEFAULT_SETTINGS: MeetingNotesSettings = {
 	provider: "anthropic",
 	apiKey: "",
 	baseUrl: "https://api.anthropic.com",
-	model: "claude-sonnet-4-20250514",
+	model: "claude-sonnet-4-6",
 	meetingFolder: "Meetings",
 	meetingTag: "#meeting",
 	proLicenseKey: "",
@@ -84,7 +84,7 @@ export class MeetingNotesSettingTab extends PluginSettingTab {
 			.setDesc("Model identifier passed to the provider.")
 			.addText((text) => {
 				text
-					.setPlaceholder("claude-sonnet-4-20250514")
+					.setPlaceholder("claude-sonnet-4-6")
 					.setValue(this.plugin.settings.model)
 					.onChange(async (value) => {
 						this.plugin.settings.model = value.trim();
