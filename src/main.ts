@@ -1,4 +1,4 @@
-import { Notice, Plugin } from "obsidian";
+import { Notice, Plugin, TFile } from "obsidian";
 import {
 	DEFAULT_SETTINGS,
 	MeetingNotesSettingTab,
@@ -48,6 +48,22 @@ export default class MeetingNotesSynthesizerPlugin extends Plugin {
 				void this.runSync();
 			},
 		});
+
+		this.addCommand({
+			id: "generate-synthesis-report",
+			name: "Generate synthesis report",
+			callback: () => {
+				void this.runGenerateReport();
+			},
+		});
+
+		this.addRibbonIcon(
+			"list-checks",
+			"Generate meeting synthesis report",
+			() => {
+				void this.runGenerateReport();
+			}
+		);
 	}
 
 	override async onunload(): Promise<void> {}
@@ -95,5 +111,35 @@ export default class MeetingNotesSynthesizerPlugin extends Plugin {
 		new Notice(
 			`Synced ${notes.length} note(s) — ${decisions} decision(s), ${actions} action(s).`
 		);
+	}
+
+	/**
+	 * Render the report from the current cache and write it to a fixed vault
+	 * note, overwriting if it exists, then open it. Reads the cache only — does
+	 * not trigger a sync.
+	 */
+	private async runGenerateReport(): Promise<void> {
+		const path = "Meeting Synthesis.md";
+		try {
+			const markdown = this.engine.buildReportMarkdown();
+
+			const existing = this.app.vault.getAbstractFileByPath(path);
+			let file: TFile;
+			if (existing instanceof TFile) {
+				await this.app.vault.modify(existing, markdown);
+				file = existing;
+			} else {
+				file = await this.app.vault.create(path, markdown);
+			}
+
+			await this.app.workspace.getLeaf(false).openFile(file);
+			new Notice("Synthesis report updated.");
+		} catch (error) {
+			console.error(
+				"Meeting Notes Synthesizer: failed to write synthesis report",
+				error
+			);
+			new Notice("Failed to write synthesis report. See console.");
+		}
 	}
 }

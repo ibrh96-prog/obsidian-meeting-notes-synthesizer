@@ -134,16 +134,66 @@ export class SynthesisEngine {
 		this.cache.lastSynced = new Date().toISOString();
 	}
 
+	/**
+	 * All active decisions across every cached note, newest first. When a topic
+	 * is given, keep only decisions whose topic contains it (case-insensitive).
+	 * Superseded decisions are excluded — that handling arrives with conflict
+	 * detection.
+	 */
 	getDecisionHistory(topic?: string): Decision[] {
-		// TODO Phase 3: return decisions from the cache, filtered by topic.
-		void topic;
-		return [];
+		const needle = topic?.trim().toLowerCase() ?? "";
+
+		const decisions: Decision[] = [];
+		for (const entry of Object.values(this.cache.notes)) {
+			for (const decision of entry.decisions) {
+				if (decision.status !== "active") {
+					continue;
+				}
+				if (needle !== "" && !decision.topic.toLowerCase().includes(needle)) {
+					continue;
+				}
+				decisions.push(decision);
+			}
+		}
+
+		decisions.sort((a, b) => b.date.localeCompare(a.date));
+		return decisions;
 	}
 
+	/**
+	 * All still-open actions across every cached note. When an owner is given,
+	 * keep only actions whose owner contains it (case-insensitive). Sorted so
+	 * dated actions come first (earliest due first), undated actions after.
+	 */
 	getOpenActions(owner?: string): ActionItem[] {
-		// TODO Phase 3: return open action items from the cache, filtered by owner.
-		void owner;
-		return [];
+		const needle = owner?.trim().toLowerCase() ?? "";
+
+		const actions: ActionItem[] = [];
+		for (const entry of Object.values(this.cache.notes)) {
+			for (const action of entry.actions) {
+				if (!action.open) {
+					continue;
+				}
+				if (needle !== "" && !action.owner.toLowerCase().includes(needle)) {
+					continue;
+				}
+				actions.push(action);
+			}
+		}
+
+		actions.sort((a, b) => {
+			if (a.dueDate && b.dueDate) {
+				return a.dueDate.localeCompare(b.dueDate);
+			}
+			if (a.dueDate) {
+				return -1;
+			}
+			if (b.dueDate) {
+				return 1;
+			}
+			return 0;
+		});
+		return actions;
 	}
 
 	getWeeklyRollup(weekStartISO: string): {
@@ -158,6 +208,69 @@ export class SynthesisEngine {
 	detectConflicts(): Decision[] {
 		// TODO Phase 3: flag superseded/conflicting decisions across meetings.
 		return [];
+	}
+
+	// --- Report rendering ---
+
+	/**
+	 * Render the full synthesis report as a markdown document. Pure: reads the
+	 * in-memory cache and returns a string — writing it to the vault is the
+	 * caller's job. Weekly-rollup and conflict sections are placeholders until
+	 * those readers are built.
+	 */
+	buildReportMarkdown(): string {
+		const lines: string[] = [];
+
+		lines.push("# Meeting Synthesis");
+		lines.push("");
+		lines.push(`_Last synced: ${this.cache.lastSynced || "never"}_`);
+		lines.push("");
+
+		lines.push("## Decision history");
+		const decisions = this.getDecisionHistory();
+		if (decisions.length === 0) {
+			lines.push("_No decisions yet._");
+		} else {
+			for (const decision of decisions) {
+				const link = this.noteName(decision.sourcePath);
+				lines.push(
+					`- **${decision.topic}** — ${decision.text} _( ${decision.date}, [[${link}]] )_`
+				);
+			}
+		}
+		lines.push("");
+
+		lines.push("## Open actions");
+		const actions = this.getOpenActions();
+		if (actions.length === 0) {
+			lines.push("_No open actions._");
+		} else {
+			for (const action of actions) {
+				const owner = action.owner || "unassigned";
+				const due = action.dueDate ? ` (due ${action.dueDate})` : "";
+				const link = this.noteName(action.sourcePath);
+				lines.push(
+					`- [ ] ${action.text} — **${owner}**${due} _([[${link}]])_`
+				);
+			}
+		}
+		lines.push("");
+
+		lines.push("## Weekly rollup");
+		lines.push("_Coming soon._");
+		lines.push("");
+
+		lines.push("## Conflicts");
+		lines.push("_Coming soon._");
+		lines.push("");
+
+		return lines.join("\n");
+	}
+
+	/** Vault path → wikilink-friendly note name (drop folders and .md). */
+	private noteName(sourcePath: string): string {
+		const base = sourcePath.split("/").pop() ?? sourcePath;
+		return base.replace(/\.md$/i, "");
 	}
 
 	// --- Extraction internals ---
