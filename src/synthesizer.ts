@@ -131,14 +131,17 @@ export class SynthesisEngine {
 			}
 		}
 
+		// Re-evaluate supersession now the cache reflects the latest extraction.
+		this.applySupersession();
+
 		this.cache.lastSynced = new Date().toISOString();
 	}
 
 	/**
 	 * All active decisions across every cached note, newest first. When a topic
 	 * is given, keep only decisions whose topic contains it (case-insensitive).
-	 * Superseded decisions are excluded — that handling arrives with conflict
-	 * detection.
+	 * Superseded decisions (see {@link applySupersession}) are excluded — history
+	 * shows the decisions that currently stand.
 	 */
 	getDecisionHistory(topic?: string): Decision[] {
 		const needle = topic?.trim().toLowerCase() ?? "";
@@ -216,11 +219,8 @@ export class SynthesisEngine {
 		const weekEnd = this.addDays(weekStart, 7);
 
 		const inWindow = (date: string): boolean => {
-			const day = date.slice(0, 10);
-			if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) {
-				return false;
-			}
-			return day >= weekStart && day < weekEnd;
+			const day = this.dateKey(date);
+			return day !== "" && day >= weekStart && day < weekEnd;
 		};
 
 		const decisions: Decision[] = [];
@@ -238,10 +238,21 @@ export class SynthesisEngine {
 			}
 		}
 
-		decisions.sort((a, b) => b.date.slice(0, 10).localeCompare(a.date.slice(0, 10)));
-		actions.sort((a, b) => a.date.slice(0, 10).localeCompare(b.date.slice(0, 10)));
+		decisions.sort((a, b) => this.dateKey(b.date).localeCompare(this.dateKey(a.date)));
+		actions.sort((a, b) => this.dateKey(a.date).localeCompare(this.dateKey(b.date)));
 
 		return { decisions, actions };
+	}
+
+	/**
+	 * Reduce a date string to its calendar-date key (YYYY-MM-DD) for timezone-
+	 * safe lexicographic comparison. Returns "" when the value isn't a valid
+	 * calendar date — and "" sorts before any real date, so undated items are
+	 * treated as oldest.
+	 */
+	private dateKey(date: string): string {
+		const day = date.slice(0, 10);
+		return /^\d{4}-\d{2}-\d{2}$/.test(day) ? day : "";
 	}
 
 	/**
@@ -259,9 +270,102 @@ export class SynthesisEngine {
 		return `${y}-${m}-${d}`;
 	}
 
+	// --- Decision evolution (deterministic supersession) ---
+
+	/**
+	 * Mark decision supersession across the whole cache, in place. Decisions are
+	 * grouped by topic (case-insensitive); within a group the newest-dated one
+	 * stays "active" and the rest become "superseded" pointing at it via
+	 * supersededBy. Decisions with an empty topic are never grouped together —
+	 * an empty topic is not a shared subject — so each stands alone and active.
+	 *
+	 * Pure in-memory mutation of the cache the engine already holds: no LLM, no
+	 * Obsidian API, no I/O. Idempotent, so it can run repeatedly. Called at the
+	 * end of {@link syncNotes} (so the persisted cache is correct) and at the
+	 * start of {@link buildReportMarkdown} (so a report is consistent even when
+	 * generated without a fresh sync).
+	 */
+	private applySupersession(): void {
+		for (const group of this.groupDecisionsByTopic()) {
+			const sorted = [...group].sort((a, b) =>
+				this.dateKey(a.date).localeCompare(this.dateKey(b.date))
+			);
+			const newest = sorted[sorted.length - 1];
+			for (const decision of sorted) {
+				if (decision === newest) {
+					decision.status = "active";
+					decision.supersededBy = null;
+				} else {
+					decision.status = "superseded";
+					decision.supersededBy = newest.id;
+				}
+			}
+		}
+	}
+
+	/**
+	 * Topics whose decision changed over time: groups with 2+ decisions, each
+	 * sorted oldest → newest so a reader can show the progression ending in the
+	 * current (active) one. Single-decision topics are omitted — nothing evolved.
+	 */
+	getDecisionEvolution(): Array<{ topic: string; decisions: Decision[] }> {
+		const evolution: Array<{ topic: string; decisions: Decision[] }> = [];
+		for (const group of this.groupDecisionsByTopic()) {
+			if (group.length < 2) {
+				continue;
+			}
+			const decisions = [...group].sort((a, b) =>
+				this.dateKey(a.date).localeCompare(this.dateKey(b.date))
+			);
+			evolution.push({ topic: decisions[0].topic, decisions });
+		}
+		return evolution;
+	}
+
+	/**
+	 * Every decision currently marked superseded, across the cache. Reads the
+	 * already-marked cache state (supersession is applied during sync and report
+	 * generation), so it reflects the latest grouping.
+	 */
 	detectConflicts(): Decision[] {
-		// TODO Phase 3: flag superseded/conflicting decisions across meetings.
-		return [];
+		const superseded: Decision[] = [];
+		for (const entry of Object.values(this.cache.notes)) {
+			for (const decision of entry.decisions) {
+				if (decision.status === "superseded") {
+					superseded.push(decision);
+				}
+			}
+		}
+		return superseded;
+	}
+
+	/**
+	 * Group all cached decisions by normalized topic. Decisions with an empty
+	 * topic each become their own singleton group (never grouped together). The
+	 * returned arrays hold live references into the cache, so callers can mutate
+	 * decisions in place.
+	 */
+	private groupDecisionsByTopic(): Decision[][] {
+		const groups = new Map<string, Decision[]>();
+		const singletons: Decision[][] = [];
+
+		for (const entry of Object.values(this.cache.notes)) {
+			for (const decision of entry.decisions) {
+				const key = decision.topic.trim().toLowerCase();
+				if (key === "") {
+					singletons.push([decision]);
+					continue;
+				}
+				const existing = groups.get(key);
+				if (existing) {
+					existing.push(decision);
+				} else {
+					groups.set(key, [decision]);
+				}
+			}
+		}
+
+		return [...groups.values(), ...singletons];
 	}
 
 	// --- Report rendering ---
@@ -273,10 +377,13 @@ export class SynthesisEngine {
 	 *
 	 * The engine never computes "today" itself (that would make it
 	 * non-deterministic). The caller passes the week's start; when omitted the
-	 * Weekly rollup falls back to a "Coming soon" placeholder. The Conflicts
-	 * section is a placeholder until that reader is built.
+	 * Weekly rollup falls back to a "Coming soon" placeholder.
 	 */
 	buildReportMarkdown(weekStartISO?: string): string {
+		// Ensure supersession is current even if the report is generated without
+		// a fresh sync this session. Idempotent and cheap (no I/O, no LLM).
+		this.applySupersession();
+
 		const lines: string[] = [];
 
 		lines.push("# Meeting Synthesis");
@@ -351,9 +458,26 @@ export class SynthesisEngine {
 		}
 		lines.push("");
 
-		lines.push("## Conflicts");
-		lines.push("_Coming soon._");
-		lines.push("");
+		lines.push("## Decision evolution");
+		const evolution = this.getDecisionEvolution();
+		if (evolution.length === 0) {
+			lines.push("_No superseded decisions — every decision still stands._");
+			lines.push("");
+		} else {
+			for (const group of evolution) {
+				lines.push(`### ${group.topic}`);
+				for (const decision of group.decisions) {
+					const day = this.dateKey(decision.date) || decision.date;
+					const link = this.noteName(decision.sourcePath);
+					const current =
+						decision.status === "active" ? "  ✅ **(current)**" : "";
+					lines.push(
+						`- ${day} — ${decision.text} _([[${link}]])_${current}`
+					);
+				}
+				lines.push("");
+			}
+		}
 
 		return lines.join("\n");
 	}
