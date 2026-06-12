@@ -1,6 +1,6 @@
 {
   "name": "obsidian-meeting-notes-synthesizer",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Cross-meeting synthesis: decision history, open action tracking, and weekly rollups from your meeting notes.",
   "main": "main.js",
   "scripts": {
