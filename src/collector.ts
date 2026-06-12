@@ -77,7 +77,7 @@ export class NoteCollector {
 	private resolveDate(file: TFile): string {
 		const frontmatter =
 			this.app.metadataCache.getFileCache(file)?.frontmatter;
-		const fmDate = frontmatter?.["date"];
+		const fmDate: unknown = frontmatter?.["date"];
 		if (typeof fmDate === "string" && fmDate.trim() !== "") {
 			return fmDate.trim();
 		}

@@ -67,7 +67,7 @@ export default class MeetingNotesSynthesizerPlugin extends Plugin {
 		);
 	}
 
-	override async onunload(): Promise<void> {}
+	override onunload(): void {}
 
 	async loadSettings(): Promise<void> {
 		const data = (await this.loadData()) as Partial<PersistedData> | null;

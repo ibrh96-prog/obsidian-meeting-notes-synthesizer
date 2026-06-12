@@ -64,7 +64,7 @@ export function verifyLicense(licenseKey: string): LicenseStatus {
     }
 
     return { valid: true, email: payload.email, issued: payload.issued };
-  } catch (e) {
+  } catch {
     return { valid: false, reason: "Could not read license key." };
   }
 }
