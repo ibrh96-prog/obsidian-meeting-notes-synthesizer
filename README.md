@@ -57,7 +57,7 @@ Typical flow: add or edit meeting notes → **Sync meeting notes** → **Generat
 
 Pro is a one-time offline license: no account, no subscription, no server. Your license is verified locally on your machine.
 
-[Get Pro on Gumroad »](GUMROAD_URL_PLACEHOLDER)
+[Get Pro on Gumroad »](https://ibrh96.gumroad.com/l/lblnq)
 
 To activate, paste your license key into **Settings → Meeting Notes Synthesizer → License**.
 
