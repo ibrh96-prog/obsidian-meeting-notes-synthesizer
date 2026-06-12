@@ -1,5 +1,6 @@
 import { App, PluginSettingTab, Setting } from "obsidian";
 import type MeetingNotesSynthesizerPlugin from "./main";
+import { verifyLicense } from "./license";
 
 export type LLMProvider = "anthropic" | "openai-compatible";
 
@@ -11,6 +12,7 @@ export interface MeetingNotesSettings {
 	meetingFolder: string;
 	meetingTag: string;
 	proLicenseKey: string;
+	freeUsage: { month: string; count: number };
 }
 
 export const DEFAULT_SETTINGS: MeetingNotesSettings = {
@@ -21,6 +23,7 @@ export const DEFAULT_SETTINGS: MeetingNotesSettings = {
 	meetingFolder: "Meetings",
 	meetingTag: "#meeting",
 	proLicenseKey: "",
+	freeUsage: { month: "", count: 0 },
 };
 
 export class MeetingNotesSettingTab extends PluginSettingTab {
@@ -136,5 +139,26 @@ export class MeetingNotesSettingTab extends PluginSettingTab {
 						await this.plugin.saveSettings();
 					});
 			});
+
+		const status = verifyLicense(this.plugin.settings.proLicenseKey);
+		if (status.valid) {
+			new Setting(containerEl)
+				.setName("✓ Pro active")
+				.setDesc(`Licensed to ${status.email}`);
+		} else if (this.plugin.settings.proLicenseKey) {
+			new Setting(containerEl)
+				.setName("License invalid")
+				.setDesc(status.reason ?? "Could not verify license key.");
+		} else {
+			let desc = "Free tier — 3 syncs per month.";
+			const now = new Date();
+			const monthKey = `${now.getFullYear()}-${String(
+				now.getMonth() + 1
+			).padStart(2, "0")}`;
+			if (this.plugin.settings.freeUsage.month === monthKey) {
+				desc += ` (${this.plugin.settings.freeUsage.count}/3 used)`;
+			}
+			new Setting(containerEl).setDesc(desc);
+		}
 	}
 }

@@ -7,6 +7,7 @@ import {
 import { LLMAdapter } from "./llm";
 import { NoteCollector } from "./collector";
 import { SynthesisEngine } from "./synthesizer";
+import { verifyLicense } from "./license";
 import type { SynthesisCache } from "./types";
 
 function emptyCache(): SynthesisCache {
@@ -97,9 +98,30 @@ export default class MeetingNotesSynthesizerPlugin extends Plugin {
 	}
 
 	private async runSync(): Promise<void> {
+		const d = new Date();
+		const monthKey = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+		const isPro = verifyLicense(this.settings.proLicenseKey).valid;
+
+		if (!isPro) {
+			if (this.settings.freeUsage.month !== monthKey) {
+				this.settings.freeUsage = { month: monthKey, count: 0 };
+			}
+			if (this.settings.freeUsage.count >= 3) {
+				new Notice(
+					"Free limit reached: 3 syncs per month. Upgrade to Pro for unlimited syncs."
+				);
+				return;
+			}
+		}
+
 		const notes = await this.collector.collect();
 		await this.engine.syncNotes(notes);
 		await this.persist();
+
+		if (!isPro) {
+			this.settings.freeUsage.count += 1;
+			await this.persist();
+		}
 
 		let decisions = 0;
 		let actions = 0;
